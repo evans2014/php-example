@@ -180,9 +180,18 @@ function updateCitiesETA() {
     const cityDist = getRouteDistanceToCity(i);
     const eta = calculateETA(cityDist);
     let remainingKm = Math.max(0, Math.round(cityDist - distanceTraveledKm));
-    let li = document.createElement("li");
-    li.textContent = "До " + cities[i].name + ": " + formatMinutes(eta) + " (" + remainingKm + " км)";
-    etaList.appendChild(li);
+    
+	if (!remainingKm) {
+		let li = document.createElement("li");
+	    li.textContent = "До " + cities[i].name + " за : " + formatMinutes(eta) + " ";
+		etaList.appendChild(li);
+	} else {
+		let li = document.createElement("li");
+	    li.textContent = "До " + cities[i].name + ": " + formatMinutes(eta) + " (" + remainingKm + " км)";
+		etaList.appendChild(li);
+	}
+
+   
   }
 }
 
