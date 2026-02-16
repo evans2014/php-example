@@ -1,19 +1,15 @@
-<?php
-// Set charset
-header('Content-Type: text/html; charset=utf-8');
-
-// Четем данните от cities.json
-$citiesJson = file_get_contents('cities.json');
-?>
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Route Progress with PHP</title>
   <meta charset="utf-8" />
+  <title>Маршрут с ETA - PHP</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
   <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.css" />
+  
   <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.min.js"></script>
 
   <style>
     html, body { height: 100%; margin: 0; font-family: Arial; }
@@ -21,7 +17,7 @@ $citiesJson = file_get_contents('cities.json');
     #leftPanel { flex: 3; display: flex; flex-direction: column; height: 100vh; }
     #controls { padding: 10px; background: #f4f4f4; border-bottom: 1px solid #ccc; }
     #map { flex: 1; width: 100%; }
-    #infoPanel { flex: 1; padding: 20px; background: #f9f9f9; border-left: 1px solid #ccc; min-width: 250px; }
+    #infoPanel { flex: 1; padding: 20px; background: #f9f9f9; border-left: 1px solid #ccc; min-width: 250px; overflow-y:auto; }
     input { padding:5px; width:100px; }
     button { padding:6px 12px; cursor:pointer; }
   </style>
@@ -39,13 +35,15 @@ $citiesJson = file_get_contents('cities.json');
 
 <div id="infoPanel">
   <h3>Информация</h3>
-  <p id="formattedTime">Изминато време: -</p>
+  <p id="formattedTime">Общо време: -</p>
   <p id="percentInfo">Прогрес: -</p>
   <p id="expectedTime">Очаквано време: -</p>
+  <h4>ETA за градовете:</h4>
+  <ul id="citiesETA"></ul>
 </div>
 
 <script>
-// ===== INITIALIZATION =====
+// ===== КАРТА =====
 let map = L.map('map').setView([42.7, 25.0], 7);
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   attribution: '© OpenStreetMap contributors'
@@ -56,12 +54,20 @@ map.createPane('markerPane');
 map.getPane('routePane').style.zIndex = 400;
 map.getPane('markerPane').style.zIndex = 650;
 
-// ===== CITIES from PHP =====
-let cities = <?php echo $citiesJson; ?>;
-let routePoints = cities.map(c => c.coords);
-let greenLine, currentMarker;
+// ===== ДАННИ ЗА ГРАДОВЕТЕ =====
+let cities = [
+  { "name": "София", "coords": [42.6977, 23.3219], "address": "бул. Цариградско шосе 115" },
+  { "name": "Пловдив", "coords": [42.1354, 24.7453], "address": "бул. България 236" },
+  { "name": "Стара Загора", "coords": [42.4258, 25.6345], "address": "бул. Славянски 54" },
+  { "name": "Бургас", "coords": [42.5048, 27.4626], "address": "ул. Александровска 26" }
+];
 
-// ===== Haversine =====
+let cityMarkers = [];
+let fullRoutePoints = [];
+let greenLine, currentMarker;
+const avgSpeedKmh = 80;
+
+// ===== ФУНКЦИИ =====
 function getDistanceKm(lat1, lon1, lat2, lon2) {
   const R = 6371;
   const dLat = (lat2-lat1) * Math.PI/180;
@@ -71,14 +77,12 @@ function getDistanceKm(lat1, lon1, lat2, lon2) {
   return R * c;
 }
 
-// ===== Formatting =====
 function formatMinutes(minutes) {
   let hours = Math.floor(minutes / 60);
   let mins = Math.floor(minutes % 60);
   return hours + " ч " + (mins<10?"0"+mins:mins) + " мин";
 }
 
-// ===== Progress point =====
 function getProgressPoint(points, percent) {
   let totalSegments = points.length - 1;
   let segmentProgress = percent * totalSegments;
@@ -92,7 +96,6 @@ function getProgressPoint(points, percent) {
   return [lat, lng];
 }
 
-// ===== Зелен маршрут =====
 function getGreenRoute(points, percent) {
   let totalSegments = points.length - 1;
   let segmentProgress = percent * totalSegments;
@@ -110,63 +113,132 @@ function getGreenRoute(points, percent) {
   return progressPoints;
 }
 
-// ===== Next city =====
-function getNextCity(pos) {
-  for (let i = 0; i < routePoints.length - 1; i++) {
-    const start = routePoints[i];
-    const end = routePoints[i+1];
-    const dx = end[0] - start[0];
-    const dy = end[1] - start[1];
-    const segmentLength = Math.sqrt(dx*dx + dy*dy);
-    const dxPos = pos[0] - start[0];
-    const dyPos = pos[1] - start[1];
-    const posDist = Math.sqrt(dxPos*dxPos + dyPos*dyPos);
-    if (posDist <= segmentLength) return cities[i+1];
-  }
-  return cities[cities.length-1];
-}
-
-// ===== Total time =====
-function calculateTotalTime(points, avgSpeedKmh) {
+function calculateTotalTime(points, avgSpeed) {
   let totalKm = 0;
   for (let i=0;i<points.length-1;i++){
     totalKm += getDistanceKm(points[i][0], points[i][1], points[i+1][0], points[i+1][1]);
   }
-  return Math.round((totalKm / avgSpeedKmh) * 60);
+  return Math.round((totalKm / avgSpeed) * 60);
 }
 
-// ===== Initialization =====
-function initMap() {
-  L.polyline(routePoints, { color: 'blue', weight: 5, pane: 'routePane' }).addTo(map);
+function getDistanceAlongRoute(points, currentIndex, segmentFraction) {
+  let dist = 0;
+  for (let i = 0; i < currentIndex; i++) {
+    dist += getDistanceKm(points[i][0], points[i][1], points[i+1][0], points[i+1][1]);
+  }
+  dist += getDistanceKm(points[currentIndex][0], points[currentIndex][1],
+                        points[currentIndex+1][0], points[currentIndex+1][1]) * segmentFraction;
+  return dist;
+}
 
+function calculateETA(distanceKm) {
+  return distanceKm / avgSpeedKmh * 60;
+}
+
+function getRouteDistanceToCity(cityIndex) {
+  let dist = 0;
+  for (let i = 0; i < fullRoutePoints.length - 1; i++) {
+    const segStart = fullRoutePoints[i];
+    const segEnd = fullRoutePoints[i+1];
+    dist += getDistanceKm(segStart[0], segStart[1], segEnd[0], segEnd[1]);
+    const city = cities[cityIndex];
+    const dToCity = getDistanceKm(segEnd[0], segEnd[1], city.coords[0], city.coords[1]);
+    if (dToCity < 0.05) break;
+  }
+  return dist;
+}
+
+function getRouteDistanceToPercent(percent){
+  const totalSegments = fullRoutePoints.length -1;
+  const segmentProgress = percent * totalSegments;
+  const currentSegment = Math.floor(segmentProgress);
+  const segmentFraction = segmentProgress - currentSegment;
+  return getDistanceAlongRoute(fullRoutePoints, currentSegment, segmentFraction);
+}
+
+// ===== ПРАВИЛЕН СЛЕДВАЩ ГРАД =====
+function getNextCityByProgress(distanceTraveledKm) {
+  for (let i = 1; i < cities.length; i++) {
+    const cityDistance = getRouteDistanceToCity(i); // дистанция от началото
+    if (cityDistance > distanceTraveledKm) {
+      return { city: cities[i], remainingKm: Math.round(cityDistance - distanceTraveledKm) };
+    }
+  }
+  return { city: cities[cities.length-1], remainingKm: 0 };
+}
+
+// ===== ОБНОВЯВАНЕ ETA С "До ..." =====
+function updateCitiesETA() {
+  let etaList = document.getElementById("citiesETA");
+  etaList.innerHTML = "";
+  const totalTravelTimeMinutes = calculateTotalTime(fullRoutePoints, avgSpeedKmh);
+  const minutesInput = parseFloat(document.getElementById("minutesInput").value) || 0;
+  const percentInput = minutesInput / totalTravelTimeMinutes;
+  const distanceTraveledKm = getRouteDistanceToPercent(percentInput);
+  
+  for (let i=1;i<cities.length;i++){
+    const cityDist = getRouteDistanceToCity(i);
+    const eta = calculateETA(cityDist);
+    let remainingKm = Math.max(0, Math.round(cityDist - distanceTraveledKm));
+    let li = document.createElement("li");
+    li.textContent = "До " + cities[i].name + ": " + formatMinutes(eta) + " (" + remainingKm + " км)";
+    etaList.appendChild(li);
+  }
+}
+
+// ===== ИНИЦИАЛИЗАЦИЯ =====
+function initMap() {
   cities.forEach((city,index)=>{
     let color = index===0?"green":index===cities.length-1?"red":"blue";
-    L.circleMarker(city.coords, { radius:6, color, fillColor:color, fillOpacity:1, pane:'markerPane'})
+    let marker = L.circleMarker(city.coords, { radius:6, color, fillColor:color, fillOpacity:1, pane:'markerPane'})
       .addTo(map)
       .bindPopup("<b>"+city.name+"</b><br>Адрес: "+city.address);
+    cityMarkers.push(marker);
   });
 
-  const totalTravelTimeMinutes = calculateTotalTime(routePoints, 80);
-  document.getElementById("expectedTime").innerText =
-    "Очаквано време: " + formatMinutes(totalTravelTimeMinutes) + " ("+totalTravelTimeMinutes+" мин)";
+  let routeControl = L.Routing.control({
+      waypoints: cities.map(c => L.latLng(c.coords[0], c.coords[1])),
+      lineOptions: { styles: [{ color: 'blue', weight: 5 }] },
+      addWaypoints: false,
+      routeWhileDragging: false,
+      draggableWaypoints: false,
+      show: false,
+      createMarker: function() { return null; }
+  }).addTo(map);
+
+  routeControl.on('routesfound', function(e) {
+      const route = e.routes[0];
+      fullRoutePoints = route.coordinates.map(c => [c.lat, c.lng]);
+      L.polyline(fullRoutePoints, { color: 'blue', weight: 5, pane:'routePane' }).addTo(map);
+      map.fitBounds(route.bounds);
+
+      const totalTravelTimeMinutes = calculateTotalTime(fullRoutePoints, avgSpeedKmh);
+      document.getElementById("expectedTime").innerText =
+        "Очаквано време: " + formatMinutes(totalTravelTimeMinutes) + " ("+totalTravelTimeMinutes+" мин)";
+
+      updateCitiesETA();
+  });
 }
 
 initMap();
 
-// ===== Update =====
+// ===== ПРОГРЕС =====
 function updateProgress() {
+  if (!fullRoutePoints.length) return;
+
   const minutesInput = document.getElementById("minutesInput").value;
-  const totalTravelTimeMinutes = calculateTotalTime(routePoints, 80);
+  const totalTravelTimeMinutes = calculateTotalTime(fullRoutePoints, avgSpeedKmh);
 
   if (minutesInput === "" || parseFloat(minutesInput) <= 0) {
     if (greenLine) map.removeLayer(greenLine);
     if (currentMarker) map.removeLayer(currentMarker);
-    L.polyline(routePoints, { color: 'blue', weight: 5, pane: 'routePane' }).addTo(map);
-    document.getElementById("formattedTime").innerText = "Изминато време: -";
+    L.polyline(fullRoutePoints, { color: 'blue', weight: 5, pane: 'routePane' }).addTo(map);
+    document.getElementById("formattedTime").innerText = "Общо време: -";
     document.getElementById("percentInfo").innerText = "Прогрес: -";
     document.getElementById("expectedTime").innerText =
       "Очаквано време: " + formatMinutes(totalTravelTimeMinutes) + " ("+totalTravelTimeMinutes+" мин)";
-    map.fitBounds(routePoints);
+    updateCitiesETA();
+    map.fitBounds(fullRoutePoints);
     return;
   }
 
@@ -174,36 +246,56 @@ function updateProgress() {
   let percent = minutes / totalTravelTimeMinutes;
   if (percent>1) percent=1;
 
-  const greenRoute = getGreenRoute(routePoints, percent);
-  const currentPosition = getProgressPoint(routePoints, percent);
+  const greenRoute = getGreenRoute(fullRoutePoints, percent);
+  const totalSegments = fullRoutePoints.length - 1;
+  const segmentProgress = percent * totalSegments;
+  const currentSegment = Math.floor(segmentProgress);
+  const segmentFraction = segmentProgress - currentSegment;
+
+  const distanceTraveledKm = getDistanceAlongRoute(fullRoutePoints, currentSegment, segmentFraction);
+  const etaMinutes = calculateETA(distanceTraveledKm);
+
+  const currentPosition = getProgressPoint(fullRoutePoints, percent);
 
   if (greenLine) map.removeLayer(greenLine);
   if (currentMarker) map.removeLayer(currentMarker);
 
   greenLine = L.polyline(greenRoute, { color: 'green', weight: 6, pane: 'routePane' }).addTo(map);
 
-  const nextCity = getNextCity(currentPosition);
-  const remainingKm = Math.round(getDistanceKm(currentPosition[0], currentPosition[1], nextCity.coords[0], nextCity.coords[1]));
+  // правилен следващ град
+  const nextCityInfo = getNextCityByProgress(distanceTraveledKm);
+  const nextCity = nextCityInfo.city;
+  const remainingKm = nextCityInfo.remainingKm;
 
-  currentMarker = L.circleMarker(currentPosition, { 
-    radius: 6,          
-    color: 'orange',    
-    weight: 3,          
-    fillColor: 'yellow',
-    fillOpacity: 1,
-    pane: 'markerPane'
+  currentMarker = L.circleMarker(currentPosition, {
+      radius: 8,
+      color: 'orange',
+      weight: 3,
+      fillColor: 'yellow',
+      fillOpacity: 1,
+      pane:'markerPane'
   })
-    .addTo(map)
-    .bindPopup(
-      "<b>Текуща позиция</b><br>" +
-      "След " + formatMinutes(minutes) + "<br>" +
-      "До " + nextCity.name + " има още " + remainingKm + " км"
-    );
+  .addTo(map)
+  .bindPopup(
+    "<b>Текуща позиция</b><br>" +
+    "След " + formatMinutes(minutes) + "<br>" +
+    "До " + nextCity.name + " има още " + remainingKm + " км<br>" +
+    "ETA от началото: " + formatMinutes(etaMinutes)
+  );
 
-  document.getElementById("formattedTime").innerText = "Изминато време: " + formatMinutes(minutes);
+  // оцветяване на преминали градове
+  cityMarkers.forEach((m, i)=>{
+    if(i===0 || i>0 && getRouteDistanceToCity(i)/calculateTotalTime(fullRoutePoints, avgSpeedKmh) <= percent){
+      m.setStyle({fillColor:'green', color:'green'});
+    }
+  });
+
+  document.getElementById("formattedTime").innerText = "Общо време: " + formatMinutes(minutes);
   document.getElementById("percentInfo").innerText = "Прогрес: " + Math.round(percent*100) + "%";
   document.getElementById("expectedTime").innerText =
     "Очаквано време: " + formatMinutes(totalTravelTimeMinutes) + " ("+totalTravelTimeMinutes+" мин)";
+
+  updateCitiesETA();
 
   map.panTo(currentPosition);
 }
